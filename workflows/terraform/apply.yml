@@ -1,0 +1,75 @@
+name: Terraform Apply
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: true
+        type: string
+        description: "Directory containing Terraform files"
+      terraform-version:
+        required: false
+        type: string
+        default: 'latest' # 1.12.2
+        description: "Terraform version to use"
+      aws-region:
+        required: false
+        type: string
+        default: 'eu-west-2'
+        description: "AWS region for deployment"
+      role-to-assume:
+        required: false
+        type: string
+        description: "AWS IAM role ARN to assume for authentication"
+      apply-args:
+        required: false
+        type: string
+        default: ''
+        description: "Additional arguments for terraform apply"
+      environment:
+        required: false
+        type: string
+        default: ''
+        description: "GitHub environment for deployment protection"
+
+jobs:
+  terraform-apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        if: inputs.role-to-assume != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.role-to-assume }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: Terraform Init & Apply
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          terraform init
+          terraform apply -auto-approve ${{ inputs.apply-args }}
+
+      - name: Create Apply Summary
+        if: always()
+        run: |
+          echo "### Terraform Apply Results" >> $GITHUB_STEP_SUMMARY
+          echo "**Directory:** \`${{ inputs.working-directory }}\`" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Apply completed successfully" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Apply failed" >> $GITHUB_STEP_SUMMARY
+          fi

@@ -1,0 +1,131 @@
+name: Terragrunt Destroy All
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: true
+        type: string
+        description: "Base directory containing environments or modules"
+      environments:
+        required: true
+        type: string
+        description: "JSON array of environment/directory names to destroy (ORDER MATTERS - reverse of apply order)"
+      terraform-version:
+        required: false
+        type: string
+        default: 'latest' # 1.12.2
+        description: "Terraform version to use"
+      terragrunt-version:
+        required: false
+        type: string
+        default: 'latest'
+        description: "Terragrunt version to use"
+      aws-region:
+        required: false
+        type: string
+        default: 'eu-west-2'
+        description: "AWS region for deployment"
+      role-to-assume:
+        required: false
+        type: string
+        description: "AWS IAM role ARN to assume for authentication"
+      destroy-args:
+        required: false
+        type: string
+        default: ''
+        description: "Additional arguments for terragrunt destroy"
+      confirmation-input:
+        required: true
+        type: string
+        description: "Required confirmation string to proceed with destroy (must match 'destroy-all-confirmed')"
+      fail-fast:
+        required: false
+        type: boolean
+        default: false
+        description: "Whether to stop on first failure (false recommended for destroy to clean up as much as possible)"
+
+jobs:
+  validate-confirmation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate Confirmation
+        run: |
+          if [ "${{ inputs.confirmation-input }}" != "destroy-all-confirmed" ]; then
+            echo "❌ Confirmation failed. Expected 'destroy-all-confirmed', got '${{ inputs.confirmation-input }}'"
+            echo "This is a safety measure to prevent accidental destruction of multiple environments."
+            exit 1
+          fi
+          echo "✅ Confirmation validated. Proceeding with multi-environment destroy operation."
+          echo "🚨 **WARNING**: This will destroy resources across multiple environments!"
+
+  destroy:
+    needs: validate-confirmation
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: ${{ fromJSON(inputs.environments) }}
+      fail-fast: ${{ inputs.fail-fast }}
+    
+    permissions:
+      id-token: write
+      contents: read
+
+    environment: ${{ matrix.environment }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        if: inputs.role-to-assume != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.role-to-assume }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: Setup Terragrunt
+        uses: autero1/action-terragrunt@v1.3.2
+        with:
+          terragrunt_version: ${{ inputs.terragrunt-version }}
+
+      - name: Terragrunt Plan Destroy
+        id: plan-destroy
+        working-directory: ${{ inputs.working-directory }}/${{ matrix.environment }}
+        run: |
+          echo "🗑️ Planning destroy for ${{ matrix.environment }}"
+          terragrunt run-all plan -destroy \
+            --terragrunt-non-interactive \
+            --terragrunt-working-dir . \
+            --terragrunt-log-level warn \
+            ${{ inputs.destroy-args }}
+        continue-on-error: true
+
+      - name: Terragrunt Destroy
+        working-directory: ${{ inputs.working-directory }}/${{ matrix.environment }}
+        run: |
+          echo "🗑️ Destroying environment: ${{ matrix.environment }}"
+          terragrunt run-all destroy \
+            --terragrunt-non-interactive \
+            --terragrunt-working-dir . \
+            --terragrunt-log-level warn \
+            --auto-approve \
+            ${{ inputs.destroy-args }}
+
+      - name: Create Destroy Summary
+        if: always()
+        run: |
+          echo "### Terragrunt Destroy: ${{ matrix.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Directory:** \`${{ inputs.working-directory }}/${{ matrix.environment }}\`" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Successfully destroyed ${{ matrix.environment }}" >> $GITHUB_STEP_SUMMARY
+            echo "🗑️ All resources in ${{ matrix.environment }} have been destroyed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Failed to destroy ${{ matrix.environment }}" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ Some resources in ${{ matrix.environment }} may still exist" >> $GITHUB_STEP_SUMMARY
+          fi

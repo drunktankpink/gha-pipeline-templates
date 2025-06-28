@@ -1,0 +1,141 @@
+name: Terraform Plan Destroy
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: true
+        type: string
+        description: "Directory containing Terraform files"
+      terraform-version:
+        required: false
+        type: string
+        default: 'latest' # 1.12.2
+        description: "Terraform version to use"
+      aws-region:
+        required: false
+        type: string
+        default: 'eu-west-2'
+        description: "AWS region for deployment"
+      role-to-assume:
+        required: false
+        type: string
+        description: "AWS IAM role ARN to assume for authentication"
+      destroy-args:
+        required: false
+        type: string
+        default: ''
+        description: "Additional arguments for terraform plan destroy"
+      target-resources:
+        required: false
+        type: string
+        default: ''
+        description: "Specific resources to target for destroy planning (comma-separated, optional)"
+      comment-pr:
+        required: false
+        type: boolean
+        default: true
+        description: "Whether to comment destroy plan output on PR"
+
+jobs:
+  terraform-plan-destroy:
+    name: Terraform Plan Destroy
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        if: inputs.role-to-assume != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.role-to-assume }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: Terraform Init
+        working-directory: ${{ inputs.working-directory }}
+        run: terraform init
+
+      - name: Terraform Plan Destroy
+        id: plan-destroy
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ -n "${{ inputs.target-resources }}" ]; then
+            # Convert comma-separated list to multiple -target flags
+            targets=""
+            IFS=',' read -ra ADDR <<< "${{ inputs.target-resources }}"
+            for resource in "${ADDR[@]}"; do
+              targets="$targets -target=$(echo $resource | xargs)"
+            done
+            terraform plan -destroy -no-color $targets ${{ inputs.destroy-args }}
+          else
+            terraform plan -destroy -no-color ${{ inputs.destroy-args }}
+          fi
+        continue-on-error: true
+
+      - name: Create Plan Status
+        id: status
+        run: |
+          if [ "${{ steps.plan-destroy.outcome }}" == "success" ]; then
+            echo "status=✅ Destroy Plan Successful" >> $GITHUB_OUTPUT
+            echo "summary=✅ Destroy plan completed successfully" >> $GITHUB_OUTPUT
+          else
+            echo "status=❌ Destroy Plan Failed" >> $GITHUB_OUTPUT
+            echo "summary=❌ Destroy plan failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Destroy Plan Summary
+        if: always()
+        run: |
+          echo "### Terraform Destroy Plan Results" >> $GITHUB_STEP_SUMMARY
+          echo "**Directory:** \`${{ inputs.working-directory }}\`" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ inputs.target-resources }}" ]; then
+            echo "**Target Resources:** \`${{ inputs.target-resources }}\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Scope:** All resources" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "${{ steps.status.outputs.summary }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⚠️ **This is only a plan - no resources were actually destroyed**" >> $GITHUB_STEP_SUMMARY
+
+      - name: Comment on PR with Destroy Plan
+        if: github.event_name == 'pull_request' && inputs.comment-pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const targetInfo = "${{ inputs.target-resources }}" ? 
+              `**Target Resources:** \`${{ inputs.target-resources }}\`` : 
+              "**Scope:** All resources";
+            
+            const output = `#### 🗑️ Terraform Destroy Plan: \`${{ inputs.working-directory }}\` ${{ steps.status.outputs.status }}
+
+            ${targetInfo}
+
+            <details><summary>⚠️ Show Destroy Plan Output (Review Carefully)</summary>
+
+            \`\`\`terraform
+            ${{ steps.plan-destroy.outputs.stdout }}
+            \`\`\`
+
+            </details>
+
+            ⚠️ **This is only a plan - no resources were actually destroyed**
+            
+            *Pusher: @${{ github.actor }}, Working Directory: \`${{ inputs.working-directory }}\`*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });

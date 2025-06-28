@@ -1,0 +1,85 @@
+name: Infracost Analysis
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: true
+        type: string
+        description: "Directory containing Terraform files"
+      terraform-version:
+        required: false
+        type: string
+        default: 'latest' # 1.12.2
+        description: "Terraform version to use"
+      aws-region:
+        required: false
+        type: string
+        default: 'eu-west-2'
+        description: "AWS region for deployment"
+      role-to-assume:
+        required: false
+        type: string
+        description: "AWS IAM role ARN to assume for authentication"
+      comment-behavior:
+        required: false
+        type: string
+        default: 'update'
+        description: "How to handle PR comments (update, new, or delete-and-new)"
+    secrets:
+      infracost-api-key:
+        required: true
+
+jobs:
+  infracost:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        if: inputs.role-to-assume != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.role-to-assume }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v2
+        with:
+          api-key: ${{ secrets.infracost-api-key }}
+
+      - name: Generate Infracost breakdown
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          terraform init
+          infracost breakdown \
+            --path=. \
+            --format=json \
+            --out-file=infracost.json
+
+      - name: Post Infracost comment
+        if: github.event_name == 'pull_request'
+        run: |
+          infracost comment github \
+            --path=infracost.json \
+            --repo=$GITHUB_REPOSITORY \
+            --github-token=${{ github.token }} \
+            --pull-request=${{ github.event.pull_request.number }} \
+            --behavior=${{ inputs.comment-behavior }}
+
+      - name: Create Cost Summary
+        run: |
+          echo "### Infrastructure Cost Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "**Directory:** \`${{ inputs.working-directory }}\`" >> $GITHUB_STEP_SUMMARY
+          infracost breakdown --path=${{ inputs.working-directory }} --format=table >> $GITHUB_STEP_SUMMARY
