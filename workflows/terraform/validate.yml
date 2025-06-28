@@ -1,0 +1,51 @@
+name: Terraform Validate
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: true
+        type: string
+        description: "Directory containing Terraform files"
+      terraform-version:
+        required: false
+        type: string
+        default: 'latest' # 1.12.2
+        description: "Terraform version to use"
+
+jobs:
+  terraform-validate:
+    name: Terraform Validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: Terraform Format Check
+        working-directory: ${{ inputs.working-directory }}
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        working-directory: ${{ inputs.working-directory }}
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        working-directory: ${{ inputs.working-directory }}
+        run: terraform validate
+
+      - name: Create Summary
+        if: always()
+        run: |
+          echo "### Terraform Validation Results" >> $GITHUB_STEP_SUMMARY
+          echo "**Directory:** \`${{ inputs.working-directory }}\`" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ All Terraform files are valid and properly formatted" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Terraform validation failed" >> $GITHUB_STEP_SUMMARY
+          fi

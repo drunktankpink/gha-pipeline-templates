@@ -1,0 +1,64 @@
+name: TFSec Security Scan
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: true
+        type: string
+        description: "Directory to scan"
+      minimum-severity:
+        required: false
+        type: string
+        default: 'HIGH'
+        description: "Minimum severity level to report (LOW, MEDIUM, HIGH, CRITICAL)"
+      fail-on-findings:
+        required: false
+        type: boolean
+        default: true
+        description: "Whether to fail the workflow on security findings"
+      exclude-checks:
+        required: false
+        type: string
+        default: ''
+        description: "Comma-separated list of check IDs to exclude"
+
+jobs:
+  tfsec:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run TFSec
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          working_directory: ${{ inputs.working-directory }}
+          format: sarif
+          soft_fail: ${{ !inputs.fail-on-findings }}
+          additional_args: >-
+            --minimum-severity ${{ inputs.minimum-severity }}
+            ${{ inputs.exclude-checks != '' && format('--exclude {0}', inputs.exclude-checks) || '' }}
+
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: tfsec.sarif
+
+      - name: Create Security Summary
+        if: always()
+        run: |
+          echo "### Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "**Directory:** \`${{ inputs.working-directory }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Minimum Severity:** \`${{ inputs.minimum-severity }}\`" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ No security issues found above threshold" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Security issues detected - check Security tab for details" >> $GITHUB_STEP_SUMMARY
+          fi

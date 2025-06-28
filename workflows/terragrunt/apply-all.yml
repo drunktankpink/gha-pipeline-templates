@@ -1,0 +1,97 @@
+name: Terragrunt Apply All
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: true
+        type: string
+        description: "Base directory containing environments or modules"
+      environments:
+        required: true
+        type: string
+        description: "JSON array of environment/directory names to apply (in order)"
+      terraform-version:
+        required: false
+        type: string
+        default: 'latest'
+        description: "Terraform version to use"
+      terragrunt-version:
+        required: false
+        type: string
+        default: 'latest'
+        description: "Terragrunt version to use"
+      aws-region:
+        required: false
+        type: string
+        default: 'us-east-1'
+        description: "AWS region for deployment"
+      role-to-assume:
+        required: false
+        type: string
+        description: "AWS IAM role ARN to assume for authentication"
+      apply-args:
+        required: false
+        type: string
+        default: ''
+        description: "Additional arguments for terragrunt apply"
+      fail-fast:
+        required: false
+        type: boolean
+        default: true
+        description: "Whether to stop on first failure"
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: ${{ fromJSON(inputs.environments) }}
+      fail-fast: ${{ inputs.fail-fast }}
+    
+    permissions:
+      id-token: write
+      contents: read
+
+    environment: ${{ matrix.environment }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        if: inputs.role-to-assume != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.role-to-assume }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: Setup Terragrunt
+        uses: autero1/action-terragrunt@v1.3.2
+        with:
+          terragrunt_version: ${{ inputs.terragrunt-version }}
+
+      - name: Terragrunt Apply
+        working-directory: ${{ inputs.working-directory }}/${{ matrix.environment }}
+        run: |
+          terragrunt run-all apply \
+            --terragrunt-non-interactive \
+            --terragrunt-working-dir . \
+            --terragrunt-log-level warn \
+            --auto-approve \
+            ${{ inputs.apply-args }}
+
+      - name: Create Summary
+        if: always()
+        run: |
+          echo "### Terragrunt Apply: ${{ matrix.environment }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Successfully applied changes to ${{ matrix.environment }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Failed to apply changes to ${{ matrix.environment }}" >> $GITHUB_STEP_SUMMARY
+          fi

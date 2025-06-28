@@ -1,0 +1,225 @@
+name: Terragrunt Plan All
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        required: true
+        type: string
+        description: "Base directory containing environments or modules"
+      environments:
+        required: true
+        type: string
+        description: "JSON array of environment/directory names to plan"
+      terraform-version:
+        required: false
+        type: string
+        default: 'latest'
+        description: "Terraform version to use"
+      terragrunt-version:
+        required: false
+        type: string
+        default: 'latest'
+        description: "Terragrunt version to use"
+      aws-region:
+        required: false
+        type: string
+        default: 'us-east-1'
+        description: "AWS region for deployment"
+      role-to-assume:
+        required: false
+        type: string
+        description: "AWS IAM role ARN to assume for authentication"
+      plan-args:
+        required: false
+        type: string
+        default: ''
+        description: "Additional arguments for terragrunt plan"
+      comment-pr:
+        required: false
+        type: boolean
+        default: true
+        description: "Whether to comment plan output on PR"
+      comment-strategy:
+        required: false
+        type: string
+        default: 'separate'
+        description: "How to handle multiple environment comments (separate, combined, summary-only)"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: ${{ fromJSON(inputs.environments) }}
+      fail-fast: false
+    
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        if: inputs.role-to-assume != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.role-to-assume }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: Setup Terragrunt
+        uses: autero1/action-terragrunt@v1.3.2
+        with:
+          terragrunt_version: ${{ inputs.terragrunt-version }}
+
+      - name: Terragrunt Plan
+        id: plan
+        working-directory: ${{ inputs.working-directory }}/${{ matrix.environment }}
+        run: |
+          terragrunt run-all plan \
+            --terragrunt-non-interactive \
+            --terragrunt-working-dir . \
+            --terragrunt-log-level warn \
+            ${{ inputs.plan-args }}
+        continue-on-error: true
+
+      - name: Create Plan Status
+        id: status
+        run: |
+          if [ "${{ steps.plan.outcome }}" == "success" ]; then
+            echo "status=✅ Plan Successful" >> $GITHUB_OUTPUT
+            echo "summary=✅ Plan completed successfully for ${{ matrix.environment }}" >> $GITHUB_OUTPUT
+            echo "emoji=✅" >> $GITHUB_OUTPUT
+          else
+            echo "status=❌ Plan Failed" >> $GITHUB_OUTPUT
+            echo "summary=❌ Plan failed for ${{ matrix.environment }}" >> $GITHUB_OUTPUT
+            echo "emoji=❌" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Plan Summary
+        if: always()
+        run: |
+          echo "### Terragrunt Plan: ${{ matrix.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Directory:** \`${{ inputs.working-directory }}/${{ matrix.environment }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.status.outputs.summary }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Comment PR - Separate Comments
+        if: github.event_name == 'pull_request' && inputs.comment-pr && inputs.comment-strategy == 'separate'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `#### Terragrunt Plan: \`${{ matrix.environment }}\` ${{ steps.status.outputs.status }}
+
+            <details><summary>Show Plan Details for ${{ matrix.environment }}</summary>
+
+            \`\`\`terraform
+            ${{ steps.plan.outputs.stdout }}
+            \`\`\`
+
+            </details>
+
+            *Environment: \`${{ matrix.environment }}\`, Pusher: @${{ github.actor }}\`*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+      - name: Store Plan Results (for combined comments)
+        if: github.event_name == 'pull_request' && inputs.comment-pr && inputs.comment-strategy != 'separate'
+        run: |
+          mkdir -p /tmp/terragrunt-results
+          echo "${{ steps.status.outputs.emoji }} **${{ matrix.environment }}**: ${{ steps.status.outputs.status }}" > /tmp/terragrunt-results/${{ matrix.environment }}.txt
+
+      - name: Upload Plan Results
+        if: github.event_name == 'pull_request' && inputs.comment-pr && inputs.comment-strategy != 'separate'
+        uses: actions/upload-artifact@v4
+        with:
+          name: plan-result-${{ matrix.environment }}
+          path: /tmp/terragrunt-results/${{ matrix.environment }}.txt
+          retention-days: 1
+
+  # Only run this job if we need combined or summary comments
+  comment-summary:
+    if: github.event_name == 'pull_request' && inputs.comment-pr && inputs.comment-strategy != 'separate'
+    needs: plan
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+
+    steps:
+      - name: Download All Plan Results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: plan-result-*
+          path: /tmp/results
+          merge-multiple: true
+
+      - name: Create Combined Comment
+        if: inputs.comment-strategy == 'combined'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            const resultsDir = '/tmp/results';
+            const files = fs.readdirSync(resultsDir);
+            
+            let summary = '#### Terragrunt Plan Results\n\n';
+            
+            files.forEach(file => {
+              const content = fs.readFileSync(path.join(resultsDir, file), 'utf8').trim();
+              summary += content + '\n';
+            });
+            
+            summary += `\n*Pusher: @${{ github.actor }}, Environments: ${{ inputs.environments }}*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
+
+      - name: Create Summary-Only Comment
+        if: inputs.comment-strategy == 'summary-only'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            const resultsDir = '/tmp/results';
+            const files = fs.readdirSync(resultsDir);
+            
+            let summary = '#### Terragrunt Plan Summary\n\n';
+            let successCount = 0;
+            let failCount = 0;
+            
+            files.forEach(file => {
+              const content = fs.readFileSync(path.join(resultsDir, file), 'utf8').trim();
+              if (content.includes('✅')) successCount++;
+              if (content.includes('❌')) failCount++;
+              summary += content + '\n';
+            });
+            
+            summary += `\n**Summary:** ${successCount} successful, ${failCount} failed\n`;
+            summary += `*Pusher: @${{ github.actor }}*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
